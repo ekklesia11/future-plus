@@ -1,0 +1,14 @@
+# node_modules
+node_modules
+
+# env
+.env
+
+# package
+package-lock.json
+
+# cdk out
+cdk.out
+
+# coverage
+coverage
