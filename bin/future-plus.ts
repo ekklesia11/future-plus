@@ -8,35 +8,27 @@ config();
 
 const app = new cdk.App();
 
-const { env } = process;
-
-const appName = env.APP_NAME;
-if (!appName) throw Error('APP_NAME must be set in env');
-
-const awsRegion = env.AWS_REGION;
-if (!awsRegion) throw Error('APP_NAME must be set in env');
-
-const hostedZoneId = env.HOSTED_ZONE_ID;
-if (!hostedZoneId) throw Error('APP_NAME must be set in env');
-
-const hostedZoneName = env.HOSTED_ZONE_NAME;
+const hostedZoneName = process.env.HOSTED_ZONE_NAME;
 if (!hostedZoneName) throw Error('APP_NAME must be set in env');
 
-const hasuraAdminSecret = env.HASURA_ADMIN_SECRET;
+const hasuraAdminSecret = process.env.HASURA_ADMIN_SECRET;
 if (!hasuraAdminSecret) throw Error('APP_NAME must be set in env');
 
-const hasuraHostname = env.HASURA_HOSTNAME;
+const hasuraHostname = process.env.HASURA_HOSTNAME;
 if (!hasuraHostname) throw Error('APP_NAME must be set in env');
 
-const apiHostname = env.API_HOSTNAME;
+const apiHostname = process.env.API_HOSTNAME;
 if (!apiHostname) throw Error('APP_NAME must be set in env');
 
+const env = {
+  account: process.env.CDK_DEFAULT_ACCOUNT,
+  region: process.env.CDK_DEFAULT_REGION,
+};
+
 new FuturePlusStack(app, 'FuturePlusStack', {
-  appName,
-  awsRegion,
-  hostedZoneId,
   hostedZoneName,
   hasuraAdminSecret,
   hasuraHostname,
   apiHostname,
+  env
 });

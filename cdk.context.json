@@ -1,0 +1,20 @@
+{
+  "hosted-zone:account=391994242101:domainName=websandbox.link:region=us-west-1": {
+    "Id": "/hostedzone/Z006492229JUDX4XTFPZ4",
+    "Name": "websandbox.link."
+  },
+  "availability-zones:account=391994242101:region=us-west-1": [
+    "us-west-1b",
+    "us-west-1c"
+  ],
+  "availability-zones:account=391994242101:region=ap-northeast-2": [
+    "ap-northeast-2a",
+    "ap-northeast-2b",
+    "ap-northeast-2c",
+    "ap-northeast-2d"
+  ],
+  "hosted-zone:account=391994242101:domainName=websandbox.link:region=ap-northeast-2": {
+    "Id": "/hostedzone/Z006492229JUDX4XTFPZ4",
+    "Name": "websandbox.link."
+  }
+}

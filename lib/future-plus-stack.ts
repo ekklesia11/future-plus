@@ -1,36 +1,43 @@
-import { Stack, StackProps, CfnOutput, RemovalPolicy } from 'aws-cdk-lib';
+import { Stack, StackProps, CfnOutput, RemovalPolicy, Duration, SecretValue } from 'aws-cdk-lib';
 import { Construct } from 'constructs';
 import * as lambda from 'aws-cdk-lib/aws-lambda';
-import * as apigw from 'aws-cdk-lib/aws-apigateway';
+import * as nodeLambda from 'aws-cdk-lib/aws-lambda-nodejs';
+import * as apigateway from 'aws-cdk-lib/aws-apigateway';
 import * as rds from 'aws-cdk-lib/aws-rds';
 import * as ec2 from 'aws-cdk-lib/aws-ec2';
 import * as ecs from 'aws-cdk-lib/aws-ecs';
 import * as ecsPatterns from 'aws-cdk-lib/aws-ecs-patterns';
-import * as secretManager from "aws-cdk-lib/aws-secretsmanager";
 import * as route53 from 'aws-cdk-lib/aws-route53';
+import * as targets from 'aws-cdk-lib/aws-route53-targets';
 import * as certificateManager from 'aws-cdk-lib/aws-certificatemanager';
+import * as iam from 'aws-cdk-lib/aws-iam';
+import * as path from 'path';
 
 interface ExtendedStackProps extends StackProps {
-  appName: string;
-  awsRegion: string;
-  hostedZoneId: string;
   hostedZoneName: string;
   hasuraAdminSecret: string;
   hasuraHostname: string;
   apiHostname: string;
 };
 
-export class FuturePlusStack extends Stack {
-  public readonly response: string;
+type DBcredentials = {
+  dbName: string;
+  username: string;
+  password: SecretValue;
+  port: number;
+  url: string;
+};
 
+export class FuturePlusStack extends Stack {
   constructor(scope: Construct, id: string, props: ExtendedStackProps) {
     super(scope, id, props);
 
-    const vpc = new ec2.Vpc(this, 'main-VPC');
+    {/* VPC */}
+    const vpc = new ec2.Vpc(this, 'VPC');
 
-    const hostedZone = route53.PublicHostedZone.fromHostedZoneAttributes(this, 'HostedZone', {
-      hostedZoneId: props.hostedZoneId,
-      zoneName: props.hostedZoneName,
+    {/* ROUTE53 && CERTIFICATE */}
+    const hostedZone = route53.HostedZone.fromLookup(this, 'HostedZone', {
+      domainName: props.hostedZoneName,
     });
 
     const hasuraCertificate = new certificateManager.DnsValidatedCertificate(this, 'HasuraCertificate', {
@@ -38,78 +45,46 @@ export class FuturePlusStack extends Stack {
       domainName: props.hasuraHostname,
     });
 
-    const restApiCertificate = new certificateManager.DnsValidatedCertificate(this, 'ActionsCertificate', {
-        hostedZone,
-        domainName: props.apiHostname,
-    });
-
-    const database = new rds.DatabaseInstance(this, 'Database', {
+    {/* DATABASE */}
+    const database = new rds.DatabaseInstance(this, 'FuturePlusDatabase', {
       engine: rds.DatabaseInstanceEngine.POSTGRES,
       vpc,
-      databaseName: 'futurePlus',
+      databaseName: 'FuturePlusDB',
       instanceType: ec2.InstanceType.of(ec2.InstanceClass.BURSTABLE3, ec2.InstanceSize.MICRO),
       removalPolicy: RemovalPolicy.DESTROY,
       storageEncrypted: true,
       allocatedStorage: 20,
       maxAllocatedStorage: 100,
+      credentials: rds.Credentials.fromGeneratedSecret('FuturePlusAdmin'),
     });
 
-    const databaseUserSecret = new rds.DatabaseSecret(this, 'DatabaseUser', {
-      username: 'admin',
-      masterSecret: database.secret,
+    new CfnOutput(this, 'Database Url', {
+      value: `${database.dbInstanceEndpointAddress}:${database.dbInstanceEndpointPort}`,
     });
 
-    databaseUserSecret.attach(database);
+    const DBcredentials: DBcredentials = {
+      dbName: 'FuturePlusDB',
+      username: 'FuturePlusAdmin',
+      password: database.secret!.secretValueFromJson('password'),
+      port: (database.dbInstanceEndpointPort as unknown) as number,
+      url: database.dbInstanceEndpointAddress,
+    };
 
-    const hasuraDatabaseUrlSecret = new secretManager.Secret(this, 'HasuraDatabaseUrlSecret', {
-      secretName: `${props.appName}-HasuraDatabaseUrl`,
-      secretStringBeta1: secretManager.SecretStringValueBeta1.fromUnsafePlaintext(database.dbInstanceEndpointAddress),
-    });
+    const databaseUrl = `postgres://${DBcredentials.username}:${DBcredentials.password}@${DBcredentials.url}:${DBcredentials.port}/${DBcredentials.dbName}`;
 
-    const hasuraAdminSecret = new secretManager.Secret(this, 'HasuraAdminSecret', {
-      secretName: `${props.appName}-HasuraAdminSecret`,
-      secretStringBeta1: secretManager.SecretStringValueBeta1.fromUnsafePlaintext(props.hasuraAdminSecret),
-      // generateSecretString: {
-      //   includeSpace: false,
-      //   passwordLength: 32,
-      //   excludePunctuation: true
-      // }
-    });
-
-    const hasuraJwtSecret = new secretManager.Secret(this, 'HasuraJwtSecret', {
-      secretName: `${props.appName}-HasuraJWTSecret`,
-      generateSecretString: {
-        includeSpace: false,
-        passwordLength: 32,
-        excludePunctuation: true
-      }
-  });
-
-    new CfnOutput(this, 'HasuraDatabase', {
-      description: 'DB info',
-      value: database.dbInstanceEndpointAddress,
-    });
-
-    new CfnOutput(this, 'HasuraDatabaseUserSecretArn', {
-      value: databaseUserSecret.secretArn,
-    });
-
-    new CfnOutput(this, 'HasuraDatabaseMasterSecretArn', {
-        value: database.secret!.secretArn,
-    });
-    
-    new CfnOutput(this, 'HasuraDatabaseUrlSecretArn', {
-        value: hasuraDatabaseUrlSecret.secretArn,
-    });
-
-    new CfnOutput(this, 'HasuraAdminSecretArn', {
-        value: hasuraAdminSecret.secretArn,
-    });
-
-    const fargate = new ecsPatterns.ApplicationLoadBalancedFargateService(this, 'FargateService', {
+    {/* ECS CLUSTER */}
+    const cluster = new ecs.Cluster(this, 'Cluster', {
       vpc,
-      memoryLimitMiB: 512,
-      cpu: 256,
+    });
+
+    cluster.addCapacity('AutoScalingGroupCapacity', {
+      instanceType: new ec2.InstanceType("t3.medium"),
+      desiredCapacity: 1,
+    });
+
+    const ecsCluster = new ecsPatterns.ApplicationLoadBalancedEc2Service(this, 'EcsCluster', {
+      cluster,
+      memoryLimitMiB: 2048,
       taskImageOptions: {
         image: ecs.ContainerImage.fromRegistry('hasura/graphql-engine:latest'),
         containerPort: 8080,
@@ -117,44 +92,71 @@ export class FuturePlusStack extends Stack {
         environment: {
           HASURA_GRAPHQL_ENABLE_CONSOLE: 'true',
           HASURA_GRAPHQL_PG_CONNECTIONS: '100',
-          HASURA_GRAPHQL_LOG_LEVEL: 'debug',
-          HASURA_GRAPHQL_JWT_SECRET: `{"type": "HS256", "key": "${hasuraJwtSecret.secretValue.toString()}"}`,
-        },
-        secrets: {
-          HASURA_GRAPHQL_DATABASE_URL: ecs.Secret.fromSecretsManager(hasuraDatabaseUrlSecret),
-          HASURA_GRAPHQL_ADMIN_SECRET: ecs.Secret.fromSecretsManager(hasuraAdminSecret),
+          HASURA_GRAPHQL_DATABASE_URL: databaseUrl,
+          HASURA_GRAPHQL_ADMIN_SECRET: props.hasuraAdminSecret,
         },
       },
-      publicLoadBalancer: true,
-      certificate: hasuraCertificate,
+      desiredCount: 1,
+      listenerPort: 443,
       domainName: props.hasuraHostname,
       domainZone: hostedZone,
-      assignPublicIp: true,
+      certificate: hasuraCertificate,
+      redirectHTTP: true,
+      publicLoadBalancer: true,
+      openListener: true,
+      healthCheckGracePeriod: Duration.seconds(90),
     });
 
-    fargate.targetGroup.configureHealthCheck({
-      enabled: true,
-      path: '/check-health',
-      healthyHttpCodes: '200',
-    });
+    {/* DB CONNECTION WITH ECS */}
+    database.connections.allowFrom(ecsCluster.service, ec2.Port.tcp(DBcredentials.port));
 
-    database.connections.allowFrom(fargate.service, new ec2.Port({
-      protocol: ec2.Protocol.TCP,
-      stringRepresentation: 'Postgres Port',
-      fromPort: 5432,
-      toPort: 5432,
-    }));
-
-    // defines an AWS Lambda resource
-    const createProgram = new lambda.Function(this, 'createProgramHandler', {
+    {/* LAMBDA REST API */}
+    const apiService = new lambda.Function(this, 'APIService', {
       runtime: lambda.Runtime.NODEJS_14_X,
-      code: lambda.Code.fromAsset('lambda'),
-      handler: 'createProgram.handler',
+      handler: 'app.handler',
+      code: new lambda.AssetCode('api'),
+      vpc,
+      vpcSubnets: {
+        subnetType: ec2.SubnetType.PRIVATE
+      },
+      environment: {
+        databaseUrl
+      }
     });
 
-    // defines an API Gateway REST API resource backed by our "hello" function.
-    new apigw.LambdaRestApi(this, 'Endpoint', {
-      handler: createProgram
+    apiService.connections.allowTo(database, ec2.Port.tcp(DBcredentials.port));
+    // apiService.connections.allowFromAnyIpv4(ec2.Port.tcp(443));
+
+    const DBpermissions = new iam.PolicyStatement({
+      actions: ['rds:*'],
+      resources: ['*'],
     });
+
+    apiService.addToRolePolicy(DBpermissions);
+
+    const apiCertificate = new certificateManager.DnsValidatedCertificate(this, 'ApiCertificate', {
+      hostedZone,
+      domainName: props.apiHostname,
+    });
+
+    const api = new apigateway.LambdaRestApi(this, 'API', {
+      handler: apiService,
+      proxy: false,
+      domainName: {
+        domainName: props.apiHostname,
+        certificate: apiCertificate,
+      }
+    });
+
+    new route53.ARecord(this, 'ApiAlias', {
+      zone: hostedZone,
+      target: route53.RecordTarget.fromAlias(new targets.ApiGateway(api)),
+      recordName: props.apiHostname,
+    });
+
+    const v1 = api.root.addResource('v1');
+    const program = v1.addResource('create-program');
+    program.addMethod('POST', new apigateway.LambdaIntegration(apiService));
+
   }
 }
