@@ -1,17 +1,15 @@
 import { Stack, StackProps, CfnOutput, RemovalPolicy, Duration, SecretValue } from 'aws-cdk-lib';
 import { Construct } from 'constructs';
-import * as lambda from 'aws-cdk-lib/aws-lambda';
-import * as nodeLambda from 'aws-cdk-lib/aws-lambda-nodejs';
-import * as apigateway from 'aws-cdk-lib/aws-apigateway';
 import * as rds from 'aws-cdk-lib/aws-rds';
 import * as ec2 from 'aws-cdk-lib/aws-ec2';
 import * as ecs from 'aws-cdk-lib/aws-ecs';
-import * as ecsPatterns from 'aws-cdk-lib/aws-ecs-patterns';
-import * as route53 from 'aws-cdk-lib/aws-route53';
-import * as targets from 'aws-cdk-lib/aws-route53-targets';
-import * as certificateManager from 'aws-cdk-lib/aws-certificatemanager';
 import * as iam from 'aws-cdk-lib/aws-iam';
-import * as path from 'path';
+import * as lambda from 'aws-cdk-lib/aws-lambda';
+import * as route53 from 'aws-cdk-lib/aws-route53';
+import * as apigateway from 'aws-cdk-lib/aws-apigateway';
+import * as targets from 'aws-cdk-lib/aws-route53-targets';
+import * as ecsPatterns from 'aws-cdk-lib/aws-ecs-patterns';
+import * as certificateManager from 'aws-cdk-lib/aws-certificatemanager';
 
 interface ExtendedStackProps extends StackProps {
   hostedZoneName: string;
@@ -102,15 +100,15 @@ export class FuturePlusStack extends Stack {
       domainZone: hostedZone,
       certificate: hasuraCertificate,
       redirectHTTP: true,
-      publicLoadBalancer: true,
       openListener: true,
+      publicLoadBalancer: true,
       healthCheckGracePeriod: Duration.seconds(90),
     });
 
     {/* DB CONNECTION WITH ECS */}
     database.connections.allowFrom(ecsCluster.service, ec2.Port.tcp(DBcredentials.port));
 
-    {/* LAMBDA REST API */}
+    {/* LAMBDA */}
     const apiService = new lambda.Function(this, 'APIService', {
       runtime: lambda.Runtime.NODEJS_14_X,
       handler: 'app.handler',
@@ -124,28 +122,42 @@ export class FuturePlusStack extends Stack {
       }
     });
 
-    apiService.connections.allowTo(database, ec2.Port.tcp(DBcredentials.port));
-    // apiService.connections.allowFromAnyIpv4(ec2.Port.tcp(443));
-
     const DBpermissions = new iam.PolicyStatement({
       actions: ['rds:*'],
       resources: ['*'],
     });
 
+    apiService.connections.allowTo(database, ec2.Port.tcp(DBcredentials.port));
     apiService.addToRolePolicy(DBpermissions);
 
+    {/* REST API */}
     const apiCertificate = new certificateManager.DnsValidatedCertificate(this, 'ApiCertificate', {
       hostedZone,
       domainName: props.apiHostname,
     });
 
-    const api = new apigateway.LambdaRestApi(this, 'API', {
-      handler: apiService,
-      proxy: false,
+    const api = new apigateway.RestApi(this, 'API', {
+      description: 'create program api',
+      defaultCorsPreflightOptions: {
+        allowHeaders: [
+          'Content-Type',
+          'X-Amz-Date',
+          'Authorization',
+          'X-Api-Key',
+        ],
+        allowMethods: ['POST'],
+        allowCredentials: true,
+        allowOrigins: ['http://localhost:3000'],
+      },
+      deploy: true,
       domainName: {
         domainName: props.apiHostname,
         certificate: apiCertificate,
       }
+    });
+
+    new CfnOutput(this, 'apiUrl', {
+      value: api.url
     });
 
     new route53.ARecord(this, 'ApiAlias', {
@@ -157,6 +169,5 @@ export class FuturePlusStack extends Stack {
     const v1 = api.root.addResource('v1');
     const program = v1.addResource('create-program');
     program.addMethod('POST', new apigateway.LambdaIntegration(apiService));
-
   }
 }
